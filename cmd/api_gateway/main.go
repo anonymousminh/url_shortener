@@ -1,7 +1,9 @@
 package main
 
-import "fmt"
+import (
+	"github.com/anonymousminh/url_shortener/internal/logger"
+)
 
 func main() {
-	fmt.Println("Starting the API Gateway...")
+	logger.Info("api_gateway", "Starting API Gateway...")
 }
