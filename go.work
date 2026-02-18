@@ -1,0 +1,7 @@
+go 1.25.0
+
+use (
+	./cmd/analytics_service
+	./cmd/api_gateway
+	./cmd/url_service
+)
