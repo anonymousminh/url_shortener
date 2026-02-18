@@ -4,4 +4,5 @@ use (
 	./cmd/analytics_service
 	./cmd/api_gateway
 	./cmd/url_service
+	./internal/logger
 )
