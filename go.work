@@ -5,4 +5,5 @@ use (
 	./cmd/api_gateway
 	./cmd/url_service
 	./internal/logger
+	./pkg/base62
 )
