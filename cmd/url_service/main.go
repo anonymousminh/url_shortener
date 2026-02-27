@@ -1,80 +1,98 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
 	"net/http"
 	"net/url"
-	"sync/atomic"
+	"os"
 
+	"github.com/anonymousminh/url_shortener/internal/storage"
 	"github.com/anonymousminh/url_shortener/pkg/base62"
-
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/labstack/echo/v5"
 )
 
-// Try in-memory first
-var (
-	urlStore = make(map[string]string)
-	counter  uint64
-)
+type application struct {
+	store storage.Storer
+}
 
-// Request/Response Structs
 type CreateURLRequest struct {
 	URL string `json:"url"`
 }
 
-type CreateURLResponse struct {
-	URL string `json:"short_url"`
-}
-
 func main() {
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		log.Fatal("DATABASE_URL is not set")
+	}
+
+	dbpool, err := pgxpool.New(context.Background(), dbURL)
+	if err != nil {
+		log.Fatalf("Failed to create database connection pool: %v", err)
+	}
+
+	if err := dbpool.Ping(context.Background()); err != nil {
+		log.Fatalf("Failed to ping database: %v", err)
+	}
+	defer dbpool.Close()
+
+	app := &application{
+		store: storage.NewPostgresStorage(dbpool),
+	}
+
 	e := echo.New()
 
-	// API Endpoints
-	e.POST("/api/v1/urls", createShortURLHandler)
-	e.GET("/api/v1/urls/:short_code", GetOriginalURLHandler)
+	e.POST("/api/v1/urls", app.createShortURLHandler)
+	e.GET("/api/v1/urls/:short_code", app.getOriginalURLHandler)
 
-	// Start URL Service in port 8081
 	if err := e.Start(":8081"); err != nil && err != http.ErrServerClosed {
-		e.Logger.Error("Shutting down the URL Service", "error", err)
+		log.Fatalf("Shutting down the URL Service: %v", err)
 	}
 }
 
-// Handlers
-func createShortURLHandler(c *echo.Context) error {
-	// 1. Bind the request body
+func (app *application) createShortURLHandler(c *echo.Context) error {
 	req := new(CreateURLRequest)
 	if err := c.Bind(req); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "Invalid request body")
 	}
 
-	// 2. Validate the URL
 	if _, err := url.ParseRequestURI(req.URL); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "Invalid URL format")
 	}
 
-	// 3. Generate a new ID
-	newID := atomic.AddUint64(&counter, 1)
-
-	// 4. Encode the ID to a short code
-	shortCode := base62.Encode(newID)
-
-	// 5. Store the mapping (in memory as for now)
-	urlStore[shortCode] = req.URL
-
-	// 6. Create the response
-	resp := CreateURLResponse{
-		URL: "http://localhost:8080/" + shortCode,
+	id, err := app.store.SaveURL(c.Request().Context(), req.URL)
+	if err != nil {
+		log.Printf("Failed to save URL: %v", err)
+		return echo.NewHTTPError(http.StatusInternalServerError, "Failed to save URL")
 	}
 
-	return c.JSON(http.StatusCreated, resp)
+	shortCode := base62.Encode(uint64(id))
+
+	if err := app.store.UpdateShortCode(c.Request().Context(), id, shortCode); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "Could not update short code")
+	}
+
+	return c.JSON(http.StatusCreated, map[string]string{
+		"short_url":    fmt.Sprintf("http://localhost:8081/%s", shortCode),
+		"original_url": req.URL,
+	})
 }
 
-func GetOriginalURLHandler(c *echo.Context) error {
+func (app *application) getOriginalURLHandler(c *echo.Context) error {
 	shortCode := c.Param("short_code")
 
-	originalURL, found := urlStore[shortCode]
-	if !found {
-		return echo.NewHTTPError(http.StatusNotFound, "Short URL not found")
+	originalURL, err := app.store.GetURLByShortCode(c.Request().Context(), shortCode)
+	if err != nil {
+		if errors.Is(err, storage.ErrURLNotFound) {
+			return echo.NewHTTPError(http.StatusNotFound, "Short URL not found")
+		}
+		return echo.NewHTTPError(http.StatusInternalServerError, "Database error")
 	}
 
-	return c.JSON(http.StatusOK, map[string]string{"original_url": originalURL})
+	return c.JSON(http.StatusOK, map[string]string{
+		"original_url": originalURL,
+	})
 }
